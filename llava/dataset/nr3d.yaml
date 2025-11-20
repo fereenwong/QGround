@@ -1,0 +1,18 @@
+# NR3D Dataset Configuration
+# Dataset-specific settings only. Shared paths are in base.yaml
+
+dataset: NR3D
+
+# NR3D annotation files
+data_dir: /path/to/dataset/nr3d
+data_files:
+  train: nr3d_train.csv
+  test: nr3d_test.csv
+
+# LLaVA grounding output paths
+llava_grounding_dir: /path/to/LLAVA_grounding/NR3D
+
+# Parsing output files
+parsed_file: description_parsing_test.json
+parsed_with_candidate_file: description_parsing_test_with_candidates.json
+verification_file: instances_verification_test.json

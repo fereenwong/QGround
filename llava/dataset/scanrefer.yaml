@@ -1,0 +1,18 @@
+# ScanRefer Dataset Configuration
+# Dataset-specific settings only. Shared paths are in base.yaml
+
+dataset: ScanRefer
+
+# ScanRefer annotation files
+data_dir: /path/to/dataset/scanrefer
+data_files:
+  train: ScanRefer_filtered_train.json
+  val: ScanRefer_filtered_val.json
+
+# LLaVA grounding output paths
+llava_grounding_dir: /path/to/LLAVA_grounding/ScanRefer
+
+# Parsing output files
+parsed_file: description_parsing_val.json
+parsed_with_candidate_file: description_parsing_val_with_candidates.json
+verification_file: instances_verification_val.json
