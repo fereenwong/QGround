@@ -13,13 +13,13 @@ import yaml
 # Model Configuration
 # ============================================================
 
-MODEL_PATH = "/path/to/pretrained/llava-onevision-qwen2-7b-ov"
+MODEL_PATH = os.environ.get("QGROUND_MODEL_PATH", "/path/to/pretrained/llava-onevision-qwen2-7b-ov")
 
 # ============================================================
 # YAML Config Paths
 # ============================================================
 
-CONFIG_DIR = os.path.dirname(__file__)
+CONFIG_DIR = os.environ.get("QGROUND_CONFIG_DIR", os.path.dirname(__file__))
 BASE_CONFIG = os.path.join(CONFIG_DIR, "base.yaml")
 DATASET_CONFIGS = {
     "scanrefer": os.path.join(CONFIG_DIR, "scanrefer.yaml"),

@@ -37,7 +37,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
     elif torch_dtype == "bfloat16":
         kwargs["torch_dtype"] = torch.bfloat16
     else:
-        import pdb;pdb.set_trace()
+        raise ValueError(f"Unsupported torch_dtype: {torch_dtype}")
 
     if customized_config is not None:
         kwargs["config"] = customized_config

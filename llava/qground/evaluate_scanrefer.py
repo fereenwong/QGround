@@ -13,6 +13,7 @@ import pickle
 import numpy as np
 import torch
 import yaml
+from llava.dataset.config import load_dataset_config
 from tqdm import tqdm
 
 
@@ -181,7 +182,7 @@ def load_config(config_path):
 def main(args):
     # Load config
     config_path = os.path.join(os.path.dirname(__file__), '..', 'dataset', 'scanrefer.yaml')
-    config = load_config(config_path)
+    config = load_dataset_config("scanrefer")
 
     # Determine paths from config
     data_dir = config['data_dir']

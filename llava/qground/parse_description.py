@@ -14,8 +14,6 @@ import os
 import json
 import pandas as pd
 from tqdm import tqdm
-import matplotlib
-matplotlib.use("Agg", force=True)
 
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, IGNORE_INDEX
 from llava.conversation import conv_templates, SeparatorStyle
@@ -104,11 +102,16 @@ def load_nr3d_dataset(csv_path):
     df = pd.read_csv(csv_path)
 
     dataset_info = []
+    annotation_counts = {}
     for idx, row in df.iterrows():
+        # Match the evaluator: integer annotation index within each scene/object.
+        pair = (row['scan_id'], int(row['target_id']))
+        ann_id = annotation_counts.get(pair, 0)
+        annotation_counts[pair] = ann_id + 1
         item = {
             'scene_id': row['scan_id'],
             'object_id': str(row['target_id']),
-            'ann_id': str(row.get('ann_id', idx)),
+            'ann_id': ann_id,
             'description': row['utterance'],
             'instance_type': row.get('instance_type', ''),
         }
@@ -203,6 +206,8 @@ def eval_model(args):
         dataset_info = load_nr3d_dataset(input_file)
 
     print(f"Input file: {input_file}")
+    if args.max_samples is not None:
+        dataset_info = dataset_info[:args.max_samples]
     print(f"Loaded {len(dataset_info)} samples")
 
     # Determine save file path from YAML config or argument
@@ -218,10 +223,10 @@ def eval_model(args):
 
     # Model
     disable_torch_init()
-    model_path = os.path.expanduser(MODEL_PATH)
+    model_path = os.path.expanduser(args.model_path or MODEL_PATH)
     model_name = get_model_name_from_path(model_path)
     tokenizer, model, image_processor, context_len = load_pretrained_model(
-        model_path, None, model_name
+        model_path, None, model_name, attn_implementation="sdpa"
     )
 
     print(f"Save path: {save_file}")
@@ -382,6 +387,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Parse 3D visual grounding descriptions (ScanRefer/NR3D)"
     )
+    parser.add_argument("--model-path", default=None)
+    parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--dataset-type", type=str, default="scanrefer",
                         choices=["scanrefer", "nr3d"],
                         help="Dataset type (default: scanrefer)")

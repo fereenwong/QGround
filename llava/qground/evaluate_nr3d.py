@@ -14,6 +14,7 @@ import pickle
 import numpy as np
 import torch
 import yaml
+from llava.dataset.config import load_dataset_config
 from tqdm import tqdm
 
 
@@ -148,7 +149,7 @@ def load_ground_truths(gt_csv_path, npz_dir):
             if scene_id not in scene_bbox_cache:
                 npz_path = os.path.join(npz_dir, f"{scene_id}.npz")
                 if not os.path.exists(npz_path):
-                    continue
+                    raise FileNotFoundError(npz_path)
 
                 npz_data = np.load(npz_path, allow_pickle=True)
                 bbox8_all = npz_data['bbox8']
@@ -164,7 +165,7 @@ def load_ground_truths(gt_csv_path, npz_dir):
                 scene_bbox_cache[scene_id] = aabb_bounds_dict
 
             if object_id not in scene_bbox_cache.get(scene_id, {}):
-                continue
+                raise ValueError(f'Missing ground-truth object {scene_id}/{object_id}')
 
             aabb_bound = scene_bbox_cache[scene_id][object_id]
 
@@ -225,7 +226,7 @@ def process_predictions_random(predictions, ground_truths, rng):
 def main(args):
     # Load config
     config_path = os.path.join(os.path.dirname(__file__), '..', 'dataset', 'nr3d.yaml')
-    config = load_config(config_path)
+    config = load_dataset_config("nr3d")
 
     # Determine paths from config
     data_dir = config['data_dir']

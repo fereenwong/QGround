@@ -346,7 +346,7 @@ def main(args):
         raise FileNotFoundError(f"NPZ directory not found: {npz_dir}")
 
     # Create output directory if needed
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
 
     # Load model
     print("Loading LLaVA model...")
@@ -354,7 +354,7 @@ def main(args):
     model_path = os.path.expanduser(model_path)
     model_name = get_model_name_from_path(model_path)
     tokenizer, model, image_processor, context_len = load_pretrained_model(
-        model_path, args.model_base, model_name
+        model_path, args.model_base, model_name, attn_implementation="sdpa"
     )
     print(f"Model loaded: {model_name}\n")
 

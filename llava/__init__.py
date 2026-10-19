@@ -1,1 +1,1 @@
-from .model import LlavaLlamaForCausalLM
+"""QGround and its vendored LLaVA inference components."""

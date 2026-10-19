@@ -14,8 +14,7 @@ The candidate with the highest preference wins; its 3D AABB is the prediction.
 
 Dataset-aware Q1 skip:
   - ScanRefer: ask all questions, including the category question (Q1).
-  - Nr3D:      skip Q1 by default. Q1 stays in the parsed file but is not
-               asked at inference, matching the published Skip-Q1 setting.
+  - Nr3D: skip the category question before inference by default.
 
 Requires `attn_implementation="sdpa"` (FlashAttention-2 does not support 4D
 attention masks).
@@ -40,6 +39,7 @@ from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import get_model_name_from_path
 from llava.dataset.config import MODEL_PATH, load_dataset_config
+from llava.qground.predictions import predictions_from_details
 
 
 # =============================================================================
@@ -162,66 +162,95 @@ def build_input_ids_with_positions(tokenizer, system_msg, num_images,
 # Build 4D attention mask + custom position_ids
 # =============================================================================
 
-def build_4d_mask_and_position_ids(expanded_len, question_boundaries,
-                                   intro_token_count, tail_len,
-                                   nl_after_images_len, dtype, device):
+def build_4d_mask_and_position_ids(
+    expanded_len,
+    question_boundaries,
+    intro_token_count,
+    tail_len,
+    nl_after_images_len,
+    dtype,
+    device,
+):
     """
-    Construct a 4D attention mask and (1, S) position_ids such that:
-      - Shared prefix [0, P): standard causal attention.
-      - Each Qi block: causal within itself; attends to the entire shared
-                       prefix; CANNOT attend to other Q blocks.
-      - Position IDs: shared prefix [0..P-1]; each Qi restarts from P, so
-                       every question has identical RoPE distance to the
-                       visual tokens.
+    Build the 4D attention mask and custom position_ids for masked attention.
 
-    The mask is returned as a (1, 1, S, S) BOOL tensor (True = attend,
-    False = block). LLaMA-style SdpaAttention in transformers reliably
-    respects bool 4D masks; the float-additive form goes through a different
-    code path that can be overridden by `is_causal=True` and silently fall
-    back to plain causal attention. `dtype` is kept in the signature for API
-    compatibility but is no longer used for the mask itself.
+    Each question block now includes turn-closing + assistant-start tokens, so
+    the model sees a complete conversation turn for each question.
+
+    The attention mask ensures:
+      - Shared prefix (system + images + intro): standard causal attention
+      - Each Qi block (question text + turn markers): attends to shared_prefix + Qi only
+      - Separator tokens between questions: attend to shared prefix only
+
+    Position IDs ensure correct RoPE:
+      - Shared prefix: [0, 1, ..., P-1]
+      - Each Qi: [P, P+1, ..., P+Li-1]  (restart from P for each question)
+
+    Returns:
+        mask_4d: (1, 1, S, S) float tensor
+        position_ids: (1, S) long tensor
+        q_ranges: list of (start, end) absolute positions in expanded sequence
     """
     S = expanded_len
+    NEGINF = torch.finfo(dtype).min
     num_questions = len(question_boundaries)
 
+    # Compute key positions in the expanded sequence
+    # The "tail" after all image expansions has fixed length:
+    #   nl_tokens + tail_tokens (intro + question blocks with turn markers)
     full_tail_len = nl_after_images_len + tail_len
     tail_start = S - full_tail_len
     tail_tokens_start = tail_start + nl_after_images_len
+
+    # Shared prefix end = everything up to (but not including) first question
     shared_prefix_end = tail_tokens_start + intro_token_count  # P
 
-    q_ranges = []
+    # Question positions in expanded sequence
+    q_ranges = []  # (start, end) absolute positions
     for (qs_rel, qe_rel) in question_boundaries:
-        q_ranges.append((tail_tokens_start + qs_rel,
-                         tail_tokens_start + qe_rel))
+        qs_abs = tail_tokens_start + qs_rel
+        qe_abs = tail_tokens_start + qe_rel
+        q_ranges.append((qs_abs, qe_abs))
 
-    mask_4d = torch.zeros((1, 1, S, S), dtype=torch.bool, device=device)
+    # ==================== 4D Attention Mask ====================
+    # Shape: (1, 1, S, S), values: 0.0 = attend, NEGINF = block
+    mask_4d = torch.full((1, 1, S, S), NEGINF, dtype=dtype, device=device)
+
     P = shared_prefix_end
 
-    # Causal within shared prefix
+    # Rule 1: Causal mask for shared prefix [0, P)
     prefix_idx = torch.arange(P, device=device)
-    mask_4d[0, 0, :P, :P] = prefix_idx.unsqueeze(0) <= prefix_idx.unsqueeze(1)
+    prefix_causal = prefix_idx.unsqueeze(0) <= prefix_idx.unsqueeze(1)  # (P, P)
+    mask_4d[0, 0, :P, :P].masked_fill_(prefix_causal, 0.0)
 
-    # All non-prefix tokens see the full shared prefix
-    mask_4d[0, 0, P:, :P] = True
+    # Rule 2: All non-prefix positions can attend to the ENTIRE shared prefix
+    mask_4d[0, 0, P:, :P] = 0.0
 
-    # Causal within each question block
+    # Rule 3: Each question block has causal attention within itself
+    # (now includes turn markers: "Q1: ...\nAnswer:<|im_end|>\n<|im_start|>assistant\n")
     for (qs, qe) in q_ranges:
-        bl = qe - qs
-        if bl <= 0:
+        block_len = qe - qs
+        if block_len <= 0:
             continue
-        block_idx = torch.arange(bl, device=device)
-        mask_4d[0, 0, qs:qe, qs:qe] = block_idx.unsqueeze(0) <= block_idx.unsqueeze(1)
+        block_idx = torch.arange(block_len, device=device)
+        block_causal = block_idx.unsqueeze(0) <= block_idx.unsqueeze(1)
+        mask_4d[0, 0, qs:qe, qs:qe].masked_fill_(block_causal, 0.0)
 
-    # Position IDs
+    # ==================== Position IDs ====================
     position_ids = torch.zeros((1, S), dtype=torch.long, device=device)
+
+    # Shared prefix: [0, 1, ..., P-1]
     position_ids[0, :P] = torch.arange(P, device=device)
+
+    # Each question block: restart from P
     for (qs, qe) in q_ranges:
-        bl = qe - qs
-        if bl <= 0:
+        block_len = qe - qs
+        if block_len <= 0:
             continue
-        position_ids[0, qs:qe] = torch.arange(P, P + bl, device=device)
-    # Separator tokens between questions: assigned position P (their outputs
-    # are not used).
+        position_ids[0, qs:qe] = torch.arange(P, P + block_len, device=device)
+
+    # Separator tokens between questions: assign position P
+    # (their outputs are not used for answer extraction)
     for i in range(num_questions - 1):
         sep_start = q_ranges[i][1]
         sep_end = q_ranges[i + 1][0]
@@ -314,8 +343,8 @@ def verify_instance_with_views_mask_attention(
             for c in conditions:
                 verification_questions.append(f"Does the object satisfy this condition: {c}?")
 
-        # Per-dataset Q1 skip: drop the category question entirely (do not ask).
-        if skip_first_question and len(verification_questions) >= 1:
+        # Exclude the category question before building the model input.
+        if skip_first_question and verification_questions:
             verification_questions = verification_questions[1:]
 
         num_questions = len(verification_questions)
@@ -536,7 +565,10 @@ def main(args):
         parsed_descriptions = json.load(f)
     if parsed_descriptions and 'object_id' not in parsed_descriptions[0]:
         raise ValueError("parsed_description_file must contain 'object_id' field.")
+    if args.max_samples is not None:
+        parsed_descriptions = parsed_descriptions[:args.max_samples]
     print(f"Loaded {len(parsed_descriptions)} parsed descriptions")
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
 
     # Optional chunking for parallel runs
     if args.num_chunks > 1:
@@ -623,48 +655,23 @@ def main(args):
             'instance_verification': instance_verification,
         })
 
-        # ---- Read-preference candidate selection ----
-        # score(c) = sum_q (yes_prob_q - no_prob_q); argmax single best.
-        instance_scores = {}
-        for inst_idx, r in instance_verification.items():
-            scs = r.get('individual_scores')
-            if scs:
-                instance_scores[inst_idx] = sum(s['yes_prob'] - s['no_prob']
-                                                for s in scs)
-            elif r.get('final_decision') == 'YES':
-                instance_scores[inst_idx] = 1.0
-            else:
-                instance_scores[inst_idx] = -1.0
-
-        if instance_scores:
-            best_inst = max(instance_scores, key=instance_scores.get)
-            try:
-                bbox8_all = np.load(npz_path, allow_pickle=True)['bbox8']
-                ii = int(best_inst)
-                if ii < len(bbox8_all):
-                    bb = bbox8_all[ii]
-                    aabb = np.array([[bb.min(axis=0), bb.max(axis=0)]],
-                                    dtype=np.float32)
-                    prediction_results[(scene_id, object_id, ann_id)] = {'aabb_bound': aabb}
-            except Exception as e:
-                print(f"[WARNING] bbox load failed for {sample_key}: {e}")
-
         if (idx + 1) % args.save_interval == 0:
             with open(output_file, 'w') as f:
                 json.dump(verification_results, f, indent=2)
             print(f"\n[SAVE] {len(verification_results)} -> {output_file}")
 
+    prediction_results = predictions_from_details(verification_results, npz_dir)
     with open(output_file, 'w') as f:
         json.dump(verification_results, f, indent=2)
     print(f"\n{'='*70}")
     print(f"[DONE] verification details: {len(verification_results)} -> {output_file}")
 
-    if prediction_results:
-        pred_path = output_file[:-5] + '_predictions.pkl' \
-            if output_file.endswith('.json') else output_file + '_predictions.pkl'
-        with open(pred_path, 'wb') as f:
-            pickle.dump(prediction_results, f)
-        print(f"[DONE] predictions: {len(prediction_results)} -> {pred_path}")
+    # Persist even an empty prediction set; never leave stale predictions.
+    pred_path = output_file[:-5] + '_predictions.pkl' \
+        if output_file.endswith('.json') else output_file + '_predictions.pkl'
+    with open(pred_path, 'wb') as f:
+        pickle.dump(prediction_results, f)
+    print(f"[DONE] predictions: {len(prediction_results)} -> {pred_path}")
 
 
 # =============================================================================
@@ -700,12 +707,13 @@ if __name__ == '__main__':
     g = parser.add_mutually_exclusive_group()
     g.add_argument('--skip-category-question', dest='skip_category_question',
                    action='store_true',
-                   help="Force skip Q1 (the category question). Default: True for nr3d, False for scanrefer.")
+                   help="Skip Q1 before inference. Default: True for nr3d, False for scanrefer.")
     g.add_argument('--no-skip-category-question', dest='skip_category_question',
                    action='store_false',
-                   help="Force ask Q1.")
+                   help="Include Q1 at inference.")
     parser.set_defaults(skip_category_question=None)
 
+    parser.add_argument('--max-samples', type=int, default=None, help='Limit input records for a smoke test')
     parser.add_argument('--save-interval', type=int, default=10)
 
     parser.add_argument('--num-chunks', type=int, default=1)
