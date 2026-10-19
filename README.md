@@ -16,7 +16,7 @@ QGround turns a referring expression into explicit grounding conditions, verifie
 
 ### 1. **Clone this repository and navigate to the folder:**
 ```bash
-git clone ***
+git clone https://github.com/fereenwong/QGround.git
 cd QGround
 ```
 
